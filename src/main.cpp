@@ -27,23 +27,43 @@ const uint32_t debounce_delay = 150;      // 150ms debounce delay
 const uint32_t initial_hold_delay = 500;  // 500ms before auto-repeat
 const uint32_t repeat_delay = 150;        // 150ms between each decrement
 
+// Counter initialisation value (set by build script)
+#ifndef INIT_COUNTER
+#define INIT_COUNTER 60
+#endif
+
+#ifndef BUILD_ID
+#define BUILD_ID 0
+#endif
+
+struct FlashData {
+  uint32_t build_id;
+  int32_t counter;
+};
+
 // Function to read counter from flash
-int readCounterFromFlash() {
-  uint32_t stored_value = *(uint32_t*)flash_target_contents;
+bool readCounterFromFlash(int &counter) {
+  FlashData data;
+  memcpy(&data, flash_target_contents, sizeof(data));
   
-  // Check if value is valid (not 0xFFFFFFFF which indicates blank flash)
-  if (stored_value == 0xFFFFFFFF || stored_value > 9999) {
-    return 60; // Default value
+  // Check if this is the same build (not a fresh upload)
+  if (data.build_id == BUILD_ID && data.counter >= 0 && data.counter <= 9999) {
+    counter = (int)data.counter;
+    return true;  // Normal boot
   }
-  return (int)stored_value;
+  
+  // Fresh upload or invalid data
+  counter = INIT_COUNTER;
+  return false;  // First boot
 }
 
 // Function to save counter to flash
 void saveCounterToFlash(int value) {
-  uint32_t data = (uint32_t)value;
-  uint8_t buffer[FLASH_PAGE_SIZE];
+  FlashData data;
+  data.build_id = BUILD_ID;
+  data.counter = value;
   
-  // Prepare buffer with new value
+  uint8_t buffer[FLASH_PAGE_SIZE];
   memcpy(buffer, &data, sizeof(data));
   memset(buffer + sizeof(data), 0xFF, FLASH_PAGE_SIZE - sizeof(data));
   
@@ -65,49 +85,56 @@ void saveCounterToFlash(int value) {
 
 // Function to draw smooth circular gauge
 void drawCircularGauge(int value, int maxValue) {
+  static bool gauge_initialized = false;
+  static int last_angle = -1;
+
   int centerX = tft.width() / 2;
   int centerY = tft.height() / 2;
   int outerRadius = min(centerX, centerY) - 5;
   int innerRadius = outerRadius - 14;
-  
-  // Black background color
+
   uint16_t bgColor = TFT_BLACK;
-  
-  // Clear screen with black background
-  tft.fillScreen(bgColor);
-  
-  // Draw gauge background (full gray arc)
-  tft.drawSmoothArc(centerX, centerY, outerRadius + 4 , outerRadius + 3, 0, 360, TFT_WHITE, bgColor, false);
-  tft.drawSmoothArc(centerX, centerY, outerRadius, innerRadius, 30, 330, TFT_DARKGREY, bgColor, false);
-  
-  // Calculate gauge angle (0-360°)
-  float angle = (float)value / maxValue * 300.0;
-  
-  // Draw gauge arc with proper color
-  uint16_t gaugeColor;
-  if (value < 15) {
-    gaugeColor = TFT_RED;
-  } else if (value < 30) {
-    gaugeColor = TFT_ORANGE;
-  } else {
-    gaugeColor = TFT_GREEN;
+  uint16_t baseColor = TFT_GREEN;
+  uint16_t inverseColor = TFT_DARKGREY;
+
+  // Calculate gauge angle (0-300 degrees)
+  int angle = (int)((float)value / maxValue * 300.0f);
+
+  bool resetNeeded = (!gauge_initialized || angle > last_angle);
+
+  if (resetNeeded) {
+    tft.fillScreen(bgColor);
+    tft.drawSmoothArc(centerX, centerY, outerRadius + 4, outerRadius + 3, 0, 360, TFT_WHITE, bgColor, false);
+    tft.drawSmoothArc(centerX, centerY, outerRadius, innerRadius, 30, 330, baseColor, bgColor, false);
+
+    if (angle < 300) {
+      tft.drawSmoothArc(centerX, centerY, outerRadius, innerRadius, 30 + angle, 330, inverseColor, bgColor, false);
+    }
+
+    gauge_initialized = true;
+  } else if (angle < last_angle) {
+    // Redraw complete gray arc to avoid antialiasing artifacts
+    if (angle < 300) {
+      tft.drawSmoothArc(centerX, centerY, outerRadius, innerRadius, 30 + angle, 330, inverseColor, bgColor, false);
+    }
   }
-  
-  // Draw main arc with antialiasing
-  if (angle > 0) {
-    tft.drawSmoothArc(centerX, centerY, outerRadius, innerRadius, 30, 30 + (int)angle, gaugeColor, bgColor, false);
-  }
-  
+
   // Display "J-xx" text in center
   char buffer[16];
   snprintf(buffer, sizeof(buffer), "J-%d", value);
+
+  tft.setTextDatum(MC_DATUM); // Middle Center
+  tft.setFreeFont(&FreeSansBold18pt7b);
+
+  // Clear text area with fixed bounds (large enough for "J-000")
+  int16_t text_box_w = 80;
+  int16_t text_box_h = 30;
+  tft.fillRect(centerX - text_box_w/2, centerY - text_box_h/2, text_box_w, text_box_h, bgColor);
   
   tft.setTextColor(TFT_WHITE, bgColor);
-  tft.setTextDatum(MC_DATUM); // Middle Center
-  
-  // Use smooth FreeSans font (size 18)
-  tft.setFreeFont(&FreeSansBold18pt7b);
   tft.drawString(buffer, centerX, centerY);
+
+  last_angle = angle;
 }
 
 void setup() {
@@ -124,19 +151,26 @@ void setup() {
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   
   // Load counter from flash
-  counter = readCounterFromFlash();
-  Serial.print("Counter loaded: ");
-  Serial.println(counter);
+  bool is_normal_boot = readCounterFromFlash(counter);
   
-  // Decrement counter on startup
-  counter--;
-  if (counter < 0) {
-    counter = 60;
+  if (is_normal_boot) {
+    Serial.print("Counter loaded: ");
+    Serial.println(counter);
+    
+    // Decrement counter on normal boot
+    counter--;
+    if (counter < 0) {
+      counter = INIT_COUNTER;
+    }
+    Serial.print("Counter after startup: ");
+    Serial.println(counter);
+  } else {
+    // First boot after upload
+    Serial.print("First boot - Counter initialized: ");
+    Serial.println(counter);
   }
-  Serial.print("Counter after startup: ");
-  Serial.println(counter);
   
-  // Save new counter
+  // Save counter
   saveCounterToFlash(counter);
   
   // Display initial counter

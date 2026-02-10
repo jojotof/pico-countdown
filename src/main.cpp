@@ -97,10 +97,13 @@ void saveCounterToFlash(int value) {
 }
 
 // Function to draw smooth circular gauge
-void drawCircularGauge(int value, int maxValue) {
+void drawCircularGauge(int value, int maxValue, bool updateText = true) {
   static bool gauge_initialized = false;
   static int last_angle = -1;
   static uint16_t last_gauge_color = TFT_GREEN;
+  static uint32_t last_blink_time = 0;
+  static bool blink_state = false;
+  const uint32_t blink_interval = 500; // Blink every 500ms
 
   // Calculate gauge angle (0-300 degrees)
   int angle = (int)((float)value / maxValue * 300.0f);
@@ -108,7 +111,9 @@ void drawCircularGauge(int value, int maxValue) {
   // Determine gauge color based on value
   uint16_t inverseColor = TFT_DARKGREY; // Color for the unfilled portion of the gauge
   uint16_t gaugeColor;
-  if (value < 15) {
+  if (value == 0) {
+    gaugeColor = TFT_RED;
+  } else if (value < 15) {
     gaugeColor = TFT_RED;
   } else if (value < 30) {
     gaugeColor = TFT_ORANGE;
@@ -116,41 +121,70 @@ void drawCircularGauge(int value, int maxValue) {
     gaugeColor = TFT_GREEN;
   }
 
+  // Handle blinking for value == 0
+  if (value == 0) {
+    if (current_time - last_blink_time >= blink_interval) {
+      last_blink_time = current_time;
+      blink_state = !blink_state;
+      
+      // Draw blinking gauge
+      uint16_t blinkColor = blink_state ? TFT_RED : TFT_DARKGREY;
+      tft.drawSmoothArc(centerX, centerY, outerRadius, innerRadius, 30, 330, blinkColor, bgColor, false);
+    }
+  }
+
   bool colorChanged = (gaugeColor != last_gauge_color);
-  bool resetNeeded = (!gauge_initialized || angle > last_angle || colorChanged);
+  bool resetNeeded = (!gauge_initialized || angle > last_angle);
 
   if (resetNeeded) {
     tft.fillScreen(bgColor);
     tft.drawSmoothArc(centerX, centerY, outerRadius + 5, outerRadius + 3, 0, 360, TFT_WHITE, bgColor, false);
-    tft.drawSmoothArc(centerX, centerY, outerRadius, innerRadius, 30, 330, gaugeColor, bgColor, false);
-
-    if (angle < 300) {
-      tft.drawSmoothArc(centerX, centerY, outerRadius, innerRadius, 30 + angle, 330, inverseColor, bgColor, false);
+    
+    // Special case for value == 0: full red gauge
+    if (value == 0) {
+      tft.drawSmoothArc(centerX, centerY, outerRadius, innerRadius, 30, 330, TFT_RED, bgColor, false);
+    } else {
+      tft.drawSmoothArc(centerX, centerY, outerRadius, innerRadius, 30, 330, gaugeColor, bgColor, false);
+      if (angle < 300) {
+        tft.drawSmoothArc(centerX, centerY, outerRadius, innerRadius, 30 + angle, 330, inverseColor, bgColor, false);
+      }
     }
 
     gauge_initialized = true;
     last_gauge_color = gaugeColor;
   } else if (angle < last_angle) {
     // Redraw complete gray arc to avoid antialiasing artifacts
-    if (angle < 300) {
+    if (value == 0) {
+      // Special case: draw full red gauge when reaching 0
+      tft.drawSmoothArc(centerX, centerY, outerRadius, innerRadius, 30, 330, TFT_RED, bgColor, false);
+    } else if (angle < 300) {
       tft.drawSmoothArc(centerX, centerY, outerRadius, innerRadius, 30 + angle, 330, inverseColor, bgColor, false);
     }
   }
-
-  // Display "J-xx" text in center
-  char buffer[16];
-  snprintf(buffer, sizeof(buffer), "J-%d", value);
-
-  tft.setTextDatum(MC_DATUM); // Middle Center
-  tft.setFreeFont(&FreeSansBold18pt7b);
-
-  // Clear text area with fixed bounds (large enough for "J-000")
-  int16_t text_box_w = 80;
-  int16_t text_box_h = 30;
-  tft.fillRect(centerX - text_box_w/2, centerY - text_box_h/2, text_box_w, text_box_h, bgColor);
   
-  tft.setTextColor(TFT_WHITE, bgColor);
-  tft.drawString(buffer, centerX, centerY);
+  // Handle color change without full screen refresh
+  if (colorChanged && gauge_initialized && value != 0) {
+    tft.drawSmoothArc(centerX, centerY, outerRadius, innerRadius, 30, 30 + angle, gaugeColor, bgColor, false);
+    last_gauge_color = gaugeColor;
+  }
+
+  // Update text only if requested
+  if (updateText) {
+    // Display "J-xx" text in center
+    char buffer[16];
+    snprintf(buffer, sizeof(buffer), "J-%d", value);
+
+    tft.setTextDatum(MC_DATUM); // Middle Center
+    tft.setFreeFont(&FreeSansBold18pt7b);
+
+    // Clear text area with fixed bounds (large enough for "J-000")
+    int16_t text_box_w = 80;
+    int16_t text_box_h = 30;
+    tft.fillRect(centerX - text_box_w/2, centerY - text_box_h/2, text_box_w, text_box_h, bgColor);
+    
+    tft.setTextColor(TFT_WHITE, bgColor);
+    tft.drawString(buffer, centerX, centerY);
+  }
 
   last_angle = angle;
 }
@@ -162,7 +196,7 @@ void drawSpinnerAnimation() {
   static int spriteSize = 0;
   static int spriteOffsetX = 0;
   static int spriteOffsetY = 0;
-  
+   
   if (!sprites_created) {
     // Create sprites for double buffering
     spriteSize = (outerRadius + 6) * 2;
@@ -197,12 +231,14 @@ void drawSpinnerAnimation() {
     int end = start + spinner_arc_size;
     
     // Handle wrap-around at 360°
-    if (end > 360) {
-      // Draw arc in two parts
-      spinnerNewSprite.drawSmoothArc(spriteCenter, spriteCenter, outerRadius + 5, outerRadius + 3, start, 360, TFT_BLUE, bgColor, true);
-      spinnerNewSprite.drawSmoothArc(spriteCenter, spriteCenter, outerRadius + 5, outerRadius + 3, 0, end - 360, TFT_BLUE, bgColor, true);
-    } else {
-      spinnerNewSprite.drawSmoothArc(spriteCenter, spriteCenter, outerRadius + 5, outerRadius + 3, start, end, TFT_BLUE, bgColor, true);
+    if (counter != 0) {
+      if (end > 360) {
+        // Draw arc in two parts
+        spinnerNewSprite.drawSmoothArc(spriteCenter, spriteCenter, outerRadius + 5, outerRadius + 3, start, 360, TFT_BLUE, bgColor, true);
+        spinnerNewSprite.drawSmoothArc(spriteCenter, spriteCenter, outerRadius + 5, outerRadius + 3, 0, end - 360, TFT_BLUE, bgColor, true);
+      } else {
+        spinnerNewSprite.drawSmoothArc(spriteCenter, spriteCenter, outerRadius + 5, outerRadius + 3, start, end, TFT_BLUE, bgColor, true);
+      }
     }
     
     // Compare pixels and only update changed ones
@@ -326,6 +362,11 @@ void loop() {
   
   // Update spinner animation
   drawSpinnerAnimation();
+  
+  // Handle blinking when counter is at 0 (without updating text)
+  if (counter == 0) {
+    drawCircularGauge(counter, 60, false);
+  }
   
   delay(10); // Small delay to avoid CPU overload
 }

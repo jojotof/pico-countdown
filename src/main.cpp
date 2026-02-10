@@ -6,21 +6,34 @@
 // Button configuration
 #define BUTTON_PIN 0  // GPIO0 for button
 
-// Custom color RGB(64, 64, 64) in RGB565
-#define TFT_DARKER 0x4208
-
 // Flash address to save counter (last sector before flash size)
 #define FLASH_TARGET_OFFSET (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE)
 const uint8_t *flash_target_contents = (const uint8_t *) (XIP_BASE + FLASH_TARGET_OFFSET);
 
+uint32_t current_time = 0;
+
 // TFT screen initialization
 TFT_eSPI tft = TFT_eSPI();
+TFT_eSprite spinnerOldSprite = TFT_eSprite(&tft);
+TFT_eSprite spinnerNewSprite = TFT_eSprite(&tft);
+uint16_t bgColor = TFT_BLACK;
 
 // Global variables
 int counter = 60;
 bool button_pressed = false;
 uint32_t last_press_time = 0;
 uint32_t button_hold_time = 0;
+
+// Spinner animation configuration
+const uint32_t spinner_update_interval = 10;  // Update every 10ms
+const float spinner_speed = 4.0;  // Degrees per update
+const int spinner_arc_size = 20;  // Arc size in degrees
+
+// Gauge geometry (initialized in setup)
+int centerX = 0;
+int centerY = 0;
+int outerRadius = 0;
+int innerRadius = 0;
 
 // Timing constants
 const uint32_t debounce_delay = 150;      // 150ms debounce delay
@@ -87,31 +100,36 @@ void saveCounterToFlash(int value) {
 void drawCircularGauge(int value, int maxValue) {
   static bool gauge_initialized = false;
   static int last_angle = -1;
-
-  int centerX = tft.width() / 2;
-  int centerY = tft.height() / 2;
-  int outerRadius = min(centerX, centerY) - 5;
-  int innerRadius = outerRadius - 14;
-
-  uint16_t bgColor = TFT_BLACK;
-  uint16_t baseColor = TFT_GREEN;
-  uint16_t inverseColor = TFT_DARKGREY;
+  static uint16_t last_gauge_color = TFT_GREEN;
 
   // Calculate gauge angle (0-300 degrees)
   int angle = (int)((float)value / maxValue * 300.0f);
 
-  bool resetNeeded = (!gauge_initialized || angle > last_angle);
+  // Determine gauge color based on value
+  uint16_t inverseColor = TFT_DARKGREY; // Color for the unfilled portion of the gauge
+  uint16_t gaugeColor;
+  if (value < 15) {
+    gaugeColor = TFT_RED;
+  } else if (value < 30) {
+    gaugeColor = TFT_ORANGE;
+  } else {
+    gaugeColor = TFT_GREEN;
+  }
+
+  bool colorChanged = (gaugeColor != last_gauge_color);
+  bool resetNeeded = (!gauge_initialized || angle > last_angle || colorChanged);
 
   if (resetNeeded) {
     tft.fillScreen(bgColor);
-    tft.drawSmoothArc(centerX, centerY, outerRadius + 4, outerRadius + 3, 0, 360, TFT_WHITE, bgColor, false);
-    tft.drawSmoothArc(centerX, centerY, outerRadius, innerRadius, 30, 330, baseColor, bgColor, false);
+    tft.drawSmoothArc(centerX, centerY, outerRadius + 5, outerRadius + 3, 0, 360, TFT_WHITE, bgColor, false);
+    tft.drawSmoothArc(centerX, centerY, outerRadius, innerRadius, 30, 330, gaugeColor, bgColor, false);
 
     if (angle < 300) {
       tft.drawSmoothArc(centerX, centerY, outerRadius, innerRadius, 30 + angle, 330, inverseColor, bgColor, false);
     }
 
     gauge_initialized = true;
+    last_gauge_color = gaugeColor;
   } else if (angle < last_angle) {
     // Redraw complete gray arc to avoid antialiasing artifacts
     if (angle < 300) {
@@ -137,6 +155,73 @@ void drawCircularGauge(int value, int maxValue) {
   last_angle = angle;
 }
 
+void drawSpinnerAnimation() { 
+  static float spinner_angle = 0;
+  static uint32_t last_spinner_update = 0;
+  static bool sprites_created = false;
+  static int spriteSize = 0;
+  static int spriteOffsetX = 0;
+  static int spriteOffsetY = 0;
+  
+  if (!sprites_created) {
+    // Create sprites for double buffering
+    spriteSize = (outerRadius + 6) * 2;
+    spriteOffsetX = centerX - outerRadius - 6;
+    spriteOffsetY = centerY - outerRadius - 6;
+    
+    spinnerOldSprite.createSprite(spriteSize, spriteSize);
+    spinnerNewSprite.createSprite(spriteSize, spriteSize);
+    
+    // Initialize old sprite with white circle
+    int spriteCenter = outerRadius + 6;
+    spinnerOldSprite.fillSprite(bgColor);
+    spinnerOldSprite.drawSmoothArc(spriteCenter, spriteCenter, outerRadius + 5, outerRadius + 3, 0, 360, TFT_WHITE, bgColor, false);
+    spinnerOldSprite.pushSprite(spriteOffsetX, spriteOffsetY);
+    
+    sprites_created = true;
+  }
+  
+  if (current_time - last_spinner_update >= spinner_update_interval) {
+    last_spinner_update = current_time;
+    spinner_angle += spinner_speed;
+    if (spinner_angle >= 360) {
+      spinner_angle -= 360;
+    }
+    
+    // Draw new frame in newSprite
+    int spriteCenter = outerRadius + 6;
+    spinnerNewSprite.fillSprite(bgColor);
+    spinnerNewSprite.drawSmoothArc(spriteCenter, spriteCenter, outerRadius + 5, outerRadius + 3, 0, 360, TFT_WHITE, bgColor, false);
+    
+    int start = (int)spinner_angle;
+    int end = start + spinner_arc_size;
+    
+    // Handle wrap-around at 360°
+    if (end > 360) {
+      // Draw arc in two parts
+      spinnerNewSprite.drawSmoothArc(spriteCenter, spriteCenter, outerRadius + 5, outerRadius + 3, start, 360, TFT_BLUE, bgColor, true);
+      spinnerNewSprite.drawSmoothArc(spriteCenter, spriteCenter, outerRadius + 5, outerRadius + 3, 0, end - 360, TFT_BLUE, bgColor, true);
+    } else {
+      spinnerNewSprite.drawSmoothArc(spriteCenter, spriteCenter, outerRadius + 5, outerRadius + 3, start, end, TFT_BLUE, bgColor, true);
+    }
+    
+    // Compare pixels and only update changed ones
+    for (int y = 0; y < spriteSize; y++) {
+      for (int x = 0; x < spriteSize; x++) {
+        uint16_t oldPixel = spinnerOldSprite.readPixel(x, y);
+        uint16_t newPixel = spinnerNewSprite.readPixel(x, y);
+        
+        if (oldPixel != newPixel) {
+          tft.drawPixel(spriteOffsetX + x, spriteOffsetY + y, newPixel);
+        }
+      }
+    }
+    
+    // Swap buffers: copy new to old for next frame
+    spinnerNewSprite.pushToSprite(&spinnerOldSprite, 0, 0);
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   delay(100);
@@ -146,6 +231,12 @@ void setup() {
   // Initialize TFT screen
   tft.init();
   tft.setRotation(1); // Landscape mode
+  
+  // Initialize gauge geometry
+  centerX = tft.width() / 2 - 1;
+  centerY = tft.height() / 2 - 1;
+  outerRadius = min(centerX, centerY) - 6;
+  innerRadius = outerRadius - 12;
   
   // Initialize button
   pinMode(BUTTON_PIN, INPUT_PULLUP);
@@ -172,6 +263,9 @@ void setup() {
   
   // Save counter
   saveCounterToFlash(counter);
+
+  // Initial spinner display
+  drawSpinnerAnimation();
   
   // Display initial counter
   drawCircularGauge(counter, 60);
@@ -182,7 +276,7 @@ void setup() {
 void loop() {
   // Read button state (LOW = pressed with pull-up)
   bool button_state = (digitalRead(BUTTON_PIN) == LOW);
-  uint32_t current_time = millis();
+  current_time = millis();
   
   if (button_state) {
     // Button pressed
@@ -229,6 +323,9 @@ void loop() {
     // Button released
     button_pressed = false;
   }
+  
+  // Update spinner animation
+  drawSpinnerAnimation();
   
   delay(10); // Small delay to avoid CPU overload
 }
